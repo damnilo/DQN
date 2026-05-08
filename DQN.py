@@ -7,6 +7,7 @@ from stable_baselines3 import DQN
 from stable_baselines3.common.callbacks import BaseCallback
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
+from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
 
 class RewardTracker(BaseCallback):
     def __init__(self):
@@ -173,18 +174,14 @@ def task3():
     plot_rewards(rewards, title='One-Hot - Evaluation Rewards', window_size=10)
     env.close()
 
-class CustomMLP(gym.ObservationWrapper):
-    def __init__(self, observation_space: gym.spaces.Box, features_dim: int=64):
+class CustomMLP(BaseFeaturesExtractor):
+    def __init__(self, observation_space: gym.spaces.Box, features_dim: int = 64):
         super().__init__(observation_space, features_dim)
         in_dim = int(np.prod(observation_space.shape))
-
         self.net = nn.Sequential(
-            nn.Linear(in_dim, 128),
-            nn.ReLU(),
-            nn.Linear(128, 64),
-            nn.ReLU(),
-            nn.Linear(64, features_dim),
-            nn.ReLU()
+            nn.Linear(in_dim, 128), nn.ReLU(),
+            nn.Linear(128, 64),    nn.ReLU(),
+            nn.Linear(64, features_dim), nn.ReLU()
         )
 
     def forward(self, obs: torch.Tensor) -> torch.Tensor:
@@ -199,7 +196,7 @@ def task4():
     policy_kwargs = dict(
         features_extractor_class=CustomMLP,
         features_extractor_kwargs=dict(features_dim=64),
-        not_arch = []
+        net_arch = []
     )
 
     model = DQN(
@@ -208,6 +205,7 @@ def task4():
         learning_rate=1e-3,
         learning_starts=100,
         target_update_interval=250,
+        policy_kwargs=policy_kwargs,
         exploration_fraction=0.6,
         exploration_initial_eps=1.0,
         exploration_final_eps=0.05,
@@ -310,18 +308,14 @@ def task6():
         env.close()
 
 def visualize_path(model, env, title='', n_episodes=5, use_one_hot=False, **env_kwargs):
+
     raw_env = gym.make(env, **env_kwargs)
     desc = raw_env.unwrapped.desc
     nrow, ncol = desc.shape
     raw_env.close()
 
-    TITLE_COLOR = {b'S': 'green', b'G': 'blue', b'H': 'red', b'F': 'black'}
-    ARROW = {
-        0: '→',
-        1: '↓',
-        2: '←',
-        3: '↑'
-    }
+    TILE_COLOR = {b'S': 'limegreen', b'G': 'dodgerblue', b'H': 'tomato', b'F': '#e8e8e8'}
+    ARROW = {0: '→', 1: '↓', 2: '←', 3: '↑'}
 
     visit_counts = np.zeros((nrow, ncol), dtype=int)
     all_paths = []
@@ -335,80 +329,111 @@ def visualize_path(model, env, title='', n_episodes=5, use_one_hot=False, **env_
         path = []
 
         while not done:
-            state_idx = obs if not use_one_hot else np.argmax(obs)
+            state_idx = int(obs) if not use_one_hot else int(np.argmax(obs))
             visit_counts[state_idx // ncol, state_idx % ncol] += 1
-            path.append(obs)
-
+            path.append(state_idx)
             action, _ = model.predict(obs, deterministic=True)
-            action = int(action)
-            obs, _, terminated, truncated, _ = episode_env.step(action)
+            obs, _, terminated, truncated, _ = episode_env.step(int(action))
             done = terminated or truncated
 
-        state_idx = obs if not use_one_hot else np.argmax(obs)
+        state_idx = int(obs) if not use_one_hot else int(np.argmax(obs))
         path.append(state_idx)
         visit_counts[state_idx // ncol, state_idx % ncol] += 1
         all_paths.append(path)
         episode_env.close()
 
     last_path = all_paths[-1]
-    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-    fig.suptitle(title)
+    last_path_set = set(last_path)
+
+    # --- Naučena politika za svaku ćeliju ---
+    policy_arrows = np.full((nrow, ncol), '', dtype=object)
+    n_states = nrow * ncol
+    for s in range(n_states):
+        r, c = divmod(s, ncol)
+        tile = bytes(desc[r, c])
+        if tile in (b'H', b'G'):
+            continue
+        if use_one_hot:
+            obs_input = np.zeros(n_states, dtype=np.float32)
+            obs_input[s] = 1.0
+        else:
+            obs_input = np.array(s)
+        action, _ = model.predict(obs_input, deterministic=True)
+        policy_arrows[r, c] = ARROW[int(action)]
+
+    fig, axes = plt.subplots(1, 2, figsize=(13, 5))
+    fig.suptitle(title, fontsize=13)
+
+    # --- Lijevi plot: putanja + politika ---
     ax = axes[0]
-    ax.set_title('Visit Counts')
+    ax.set_title('Putanja posljednje epizode + politika')
     ax.set_xlim(-0.5, ncol - 0.5)
-    ax.set_ylim(-0.5, nrow - 0.5)
+    ax.set_ylim(nrow - 0.5, -0.5)   # y-osa invertovana da (0,0) bude gore-lijevo
     ax.set_xticks(np.arange(ncol))
     ax.set_yticks(np.arange(nrow))
-    ax.grid(True, linewidth=0.5, alpha=0.4)
+    ax.tick_params(length=0)
+    ax.grid(False)
 
     for r in range(nrow):
         for c in range(ncol):
             tile = bytes(desc[r, c])
-            color = TITLE_COLOR.get(tile, 'black')
-            ax.add_patch(mpatches.FancyBboxPatch(
-                (c - 0.45, r - 0.45), 0.9, 0.9, 
-                boxstyle='square,pad=0', 
-                linewidth=0, facecolor=color, zorder=0))
-            ax.text(c, r, str(visit_counts[r, c]), ha='center', 
-                    va='center', color='white', zorder=1)
+            color = TILE_COLOR.get(tile, '#e8e8e8')
+            in_path = (r * ncol + c) in last_path_set
 
-    for step_i in range(len(last_path) - 1):
-        s_from = last_path[step_i]
-        s_to = last_path[step_i + 1]
-        r0, c0 = divmod(s_from, ncol)
-        r1, c1 = divmod(s_to, ncol)
-
-        if(r0,c0) != (r1,c1):
-            ax.annotate(
-                '', xy=(c1, r1), xytext=(c0, r0),
-                arrowprops=dict(arrowstyle='->', color='yellow', lw=2),
-                zorder = 3
+            rect = mpatches.FancyBboxPatch(
+                (c - 0.48, r - 0.48), 0.96, 0.96,
+                boxstyle='round,pad=0.04',
+                linewidth=2.5 if in_path else 0.5,
+                edgecolor='royalblue' if in_path else '#cccccc',
+                facecolor=color, zorder=1
             )
+            ax.add_patch(rect)
+
+            # tile naziv
+            ax.text(c, r - 0.28, tile.decode(), ha='center', va='center',
+                    fontsize=9, color='#555', zorder=2)
+
+            # strelica politike
+            arrow = policy_arrows[r, c]
+            if arrow:
+                ax.text(c, r + 0.15, arrow, ha='center', va='center',
+                        fontsize=18, color='#333', zorder=2)
+
+            # visit count
+            ax.text(c + 0.35, r - 0.35, str(visit_counts[r, c]),
+                    ha='right', va='top', fontsize=7, color='#666', zorder=2)
+
+    # Strelice puta
+    for i in range(len(last_path) - 1):
+        s0, s1 = last_path[i], last_path[i + 1]
+        r0, c0 = divmod(s0, ncol)
+        r1, c1 = divmod(s1, ncol)
+        if (r0, c0) != (r1, c1):
+            ax.annotate('', xy=(c1, r1), xytext=(c0, r0),
+                        arrowprops=dict(arrowstyle='->', color='royalblue', lw=2),
+                        zorder=3)
 
     sr, sc = divmod(last_path[0], ncol)
     er, ec = divmod(last_path[-1], ncol)
-    ax.plot(sc, sr, 'go', markersize=12, label='Start', zorder=4)
-    ax.plot(ec, er, 'bo', markersize=12, label='Goal', zorder=4)
-    ax.legend(loc='lower right', fontsize = 8)
+    ax.plot(sc, sr, 'go', markersize=10, label='Start', zorder=4)
+    ax.plot(ec, er, 'b*', markersize=14, label='Cilj', zorder=4)
+    ax.legend(loc='lower right', fontsize=8)
 
+    # --- Desni plot: heatmap ---
     ax2 = axes[1]
-    ax2.set_title('Last Episode Path')
-
-    heat = visit_counts.reshape(nrow, ncol).astype(float)
-
-    cmap = LinearSegmentedColormap.from_list('visit_cmap', ['white', 'orange', 'red'])
-    im = ax2.imshow(heat, cmap=cmap, vmin=0, vmax=np.max(visit_counts))
+    ax2.set_title('Heatmap posjeta')
+    cmap = LinearSegmentedColormap.from_list('visit', ['#f7f7f7', 'orange', 'crimson'])
+    im = ax2.imshow(visit_counts, cmap=cmap, vmin=0, vmax=max(visit_counts.max(), 1))
     plt.colorbar(im, ax=ax2)
 
     for r in range(nrow):
         for c in range(ncol):
             tile = bytes(desc[r, c])
-            count = int(heat[r, c])
-            ax2.text(c, r, f'{count}\n{tile.decode()}', ha='center', va='center', color='black')
+            ax2.text(c, r, f"{visit_counts[r,c]}\n{tile.decode()}",
+                     ha='center', va='center', fontsize=8, color='black')
 
     ax2.set_xticks(np.arange(ncol))
     ax2.set_yticks(np.arange(nrow))
-
     plt.tight_layout()
     plt.show()
 
@@ -440,11 +465,11 @@ def train_and_show(env, title, total_timesteps=15_000, use_one_hot=False, is_sli
     return model
 
 if __name__ == "__main__":
-    # train_and_show(
-    #     "FrozenLake-v1",
-    #     title="FrozenLake 4x4 – non-slippery",
-    #     map_name="4x4", is_slippery=False
-    # )
+    train_and_show(
+        "FrozenLake-v1",
+        title="FrozenLake 4x4 – non-slippery",
+        map_name="4x4", is_slippery=False
+    )
 
     # # 4x4 slippery
     # train_and_show(
@@ -454,18 +479,18 @@ if __name__ == "__main__":
     #     total_timesteps=30_000
     # )
 
-    # 4x4 one-hot
-    train_and_show(
-        "FrozenLake-v1",
-        title="FrozenLake 4x4 – one-hot wrapper",
-        map_name="4x4", is_slippery=False,
-        use_one_hot=True
-    )
+    # # 4x4 one-hot
+    # train_and_show(
+    #     "FrozenLake-v1",
+    #     title="FrozenLake 4x4 – one-hot wrapper",
+    #     map_name="4x4", is_slippery=False,
+    #     use_one_hot=True
+    # )
 
-    # 8x8
-    train_and_show(
-        "FrozenLake-v1",
-        title="FrozenLake 8x8 – non-slippery",
-        map_name="8x8", is_slippery=False,
-        total_timesteps=50_000
-    )
+    # # 8x8
+    # train_and_show(
+    #     "FrozenLake-v1",
+    #     title="FrozenLake 8x8 – non-slippery",
+    #     map_name="8x8", is_slippery=False,
+    #     total_timesteps=50_000
+    # )
